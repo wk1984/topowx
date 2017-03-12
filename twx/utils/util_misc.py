@@ -18,6 +18,9 @@ along with TopoWx.  If not, see <http://www.gnu.org/licenses/>.
 '''
 import numpy as np
 import re
+import os
+import errno
+import xarray as xr
 
 
 class Unbuffered:
@@ -83,4 +86,35 @@ def get_val_classes(vals,num_classes):
     for split in splits:
         class_array[np.in1d(indices, split, assume_unique=True)] = class_num
         class_num+=1
-    return class_array  
+    return class_array 
+
+def mkdir_p(path):
+    '''
+    http://stackoverflow.com/questions/600268/mkdir-p-functionality-in-python
+    '''
+    try:
+        os.makedirs(path)
+    except OSError as exc: # Python >2.5
+        if exc.errno == errno.EEXIST and os.path.isdir(path):
+            pass
+        else: raise 
+        
+def read_xarray_netcdfs(fpaths, dim, transform_func=None, engine=None):
+    '''
+    Based off example at: http://xarray.pydata.org/en/stable/io.html#combining-multiple-files
+    '''
+    def process_one_path(path):
+        # use a context manager, to ensure the file gets closed after use
+        with xr.open_dataset(path, engine=engine) as ds:
+            # transform_func should do some sort of selection or
+            # aggregation
+            if transform_func is not None:
+                ds = transform_func(ds)
+            # load all data from the transformed dataset, to ensure we can
+            # use it after closing each original file
+            ds.load()
+            return ds
+
+    datasets = [process_one_path(p) for p in fpaths]
+    combined = xr.concat(datasets, dim)
+    return combined

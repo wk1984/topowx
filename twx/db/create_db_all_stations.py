@@ -19,11 +19,14 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with TopoWx.  If not, see <http://www.gnu.org/licenses/>.
 '''
+from twx.db.station_data import StationSerialDataDb, BAD, StationDataDb
+from datetime import date
 
 __all__ = ['Insert', 'InsertGhcn', 'InsertRaws', 'InsertSnotel',
            'create_netcdf_db', 'insert_data_netcdf_db',
            'MISSING', 'DTYPE_STNOBS', 'NCDF_CHK_COLS', 'add_monthly_means',
-           'add_utc_offset','dbDataset','create_quick_db', 'SnotelPreciseLoc']
+           'add_utc_offset','dbDataset','create_quick_db', 'SnotelPreciseLoc',
+           'add_obs_cnt', 'create_aux_db']
 
 import os
 import numpy as np
@@ -32,12 +35,13 @@ from twx.utils import StatusCheck, get_days_metadata, ymdL, DATE, YMD, YEAR
 from netCDF4 import Dataset
 from netCDF4 import date2num
 import netCDF4
-from netcdftime import num2date
+from netCDF4 import num2date
 from station_data import STN_NAME, ELEV, LAT, LON, STATE, STN_ID
 import twx
 import pandas as pd
 from twx.db.download_stndata import load_snotel_stn_inventory
 from twx.db.stn_utc_offsets import GeonamesError
+import xray as xr
 
 MISSING = -9999.
 NCDF_CHK_COLS = 50
@@ -85,21 +89,21 @@ class dbDataset(Dataset):
 
         self.createDimension('stn_id', stn_ids.size)
 
-        stations = self.createVariable('stn_id', 'str', ('stn_id',))
+        stations = self.createVariable('stn_id', np.str, ('stn_id',))
         stations.long_name = "station id"
         stations.standard_name = "station id"
         stations[:] = stn_ids.astype(np.object)
 
     def db_create_names_var(self, names):
 
-        namesvar = self.createVariable('name', 'str', ('stn_id',))
+        namesvar = self.createVariable('name', np.str, ('stn_id',))
         namesvar.long_name = "station name"
         namesvar.standard_name = "name"
         namesvar[:] = names.astype(np.object)
 
     def db_create_states_var(self, states):
 
-        statesvar = self.createVariable('state', 'str', ('stn_id',))
+        statesvar = self.createVariable('state', np.str, ('stn_id',))
         statesvar.long_name = "state"
         statesvar.standard_name = "state"
         statesvar[:] = states.astype(np.object)
@@ -250,49 +254,51 @@ def create_quick_db(path,stns,days,variables):
     # Set global attributes
     title = "Weather Station Database"
     ncdf_file.title = title
-    ncdf_file.institution = "University of Montana Numerical Terradynamics Simulation Group"
+    ncdf_file.institution = "Pennsylvania State University"
     ncdf_file.history = "".join(["Created on: ", datetime.datetime.strftime(datetime.date.today(), "%Y-%m-%d")])
 
     print "Creating netCDF4 database for " + str(days[DATE][0]) + " to " + str(days[DATE][-1]) + " for " + str(stns.size) + " stations."
 
     dim_time = ncdf_file.createDimension('time', days.size)
-    dim_station = ncdf_file.createDimension('stn_id', stns.size)
+    dim_station = ncdf_file.createDimension(STN_ID, stns.size)
 
     times = ncdf_file.createVariable('time', 'f8', ('time',), fill_value=False)
     times.long_name = "time"
-    times.units = "".join(["days since ", str(days[DATE][0].year), "-", str(days[DATE][0].month), "-", str(days[DATE][0].day), " 0:0:0"])
+    times.units = "".join(["days since ", str(days[DATE][0].year), "-",
+                           str(days[DATE][0].month), "-",
+                           str(days[DATE][0].day), " 0:0:0"])
     times.standard_name = "time"
     times.calendar = "standard"
     times[:] = date2num(days[DATE], times.units)
 
-    stations = ncdf_file.createVariable('stn_id', 'str', ('stn_id',))
+    stations = ncdf_file.createVariable(STN_ID, np.str, (STN_ID,))
     stations.long_name = "station id"
     stations.standard_name = "station id"
     stations[:] = stns[STN_ID].astype(np.object)
 
-    names = ncdf_file.createVariable('name', 'str', ('stn_id',))
+    names = ncdf_file.createVariable(STN_NAME, np.str, (STN_ID,))
     names.long_name = "station name"
     names.standard_name = "name"
     names[:] = stns[STN_NAME].astype(np.object)
 
-    states = ncdf_file.createVariable('state', 'str', ('stn_id',))
+    states = ncdf_file.createVariable(STATE, np.str, (STN_ID,))
     states.long_name = "state"
     states.standard_name = "state"
     states[:] = stns[STATE].astype(np.object)
 
-    latitudes = ncdf_file.createVariable('lat', 'f8', ('stn_id',), fill_value=MISSING)
+    latitudes = ncdf_file.createVariable(LAT, 'f8', (STN_ID,), fill_value=MISSING)
     latitudes.long_name = "latitude"
     latitudes.units = "degrees_north"
     latitudes.standard_name = "latitude"
     latitudes[:] = stns[LAT]
 
-    longitudes = ncdf_file.createVariable('lon', 'f8', ('stn_id',), fill_value=MISSING)
+    longitudes = ncdf_file.createVariable(LON, 'f8', (STN_ID,), fill_value=MISSING)
     longitudes.long_name = 'longitude'
     longitudes.units = "degrees_east"
     longitudes.standard_name = "longitude"
     longitudes[:] = stns[LON]
 
-    elevs = ncdf_file.createVariable('elev', 'f8', ('stn_id',), fill_value=MISSING)
+    elevs = ncdf_file.createVariable(ELEV, 'f8', (STN_ID,), fill_value=MISSING)
     elevs.long_name = "elevation"
     elevs.units = "m"
     elevs.standard_name = "elevation"
@@ -300,9 +306,9 @@ def create_quick_db(path,stns,days,variables):
     
     for varname,dtype,fill_value,long_name,units in variables:
     
-        a_var = ncdf_file.createVariable(varname, dtype, ('time', 'stn_id'),
-                                         fill_value=fill_value,
-                                         chunksizes=(days[DATE].size, NCDF_CHK_COLS))
+        a_var = ncdf_file.createVariable(varname, dtype, ('time', STN_ID),
+                                         fill_value=fill_value, zlib=True,
+                                         chunksizes=(days[DATE].size, 1))
         a_var.long_name = long_name
         a_var.units = units
 
@@ -352,7 +358,7 @@ def create_netcdf_db(path, min_date, max_date, inserts):
     print "Creating netCDF4 database for " + str(min_date) + " to " + str(max_date) + " for " + str(nstns) + " stations."
 
     dim_time = ncdf_file.createDimension('time', days.size)
-    dim_station = ncdf_file.createDimension('stn_id', nstns)
+    dim_station = ncdf_file.createDimension(STN_ID, nstns)
 
     times = ncdf_file.createVariable('time', 'f8', ('time',), fill_value=False)
     times.long_name = "time"
@@ -361,37 +367,38 @@ def create_netcdf_db(path, min_date, max_date, inserts):
     times.calendar = "standard"
     times[:] = date2num(days[DATE], times.units)
 
-    stations = ncdf_file.createVariable('stn_id', 'str', ('stn_id',))
+    stations = ncdf_file.createVariable(STN_ID, np.str, (STN_ID,))
     stations.long_name = "station id"
     stations.standard_name = "station id"
 
-    names = ncdf_file.createVariable('name', 'str', ('stn_id',))
+    names = ncdf_file.createVariable(STN_NAME, np.str, (STN_ID,))
     names.long_name = "station name"
     names.standard_name = "name"
 
-    states = ncdf_file.createVariable('state', 'str', ('stn_id',))
+    states = ncdf_file.createVariable(STATE, np.str, (STN_ID,))
     states.long_name = "state"
     states.standard_name = "state"
 
-    latitudes = ncdf_file.createVariable('lat', 'f8', ('stn_id',), fill_value=MISSING)
+    latitudes = ncdf_file.createVariable(LAT, 'f8', (STN_ID,), fill_value=MISSING)
     latitudes.long_name = "latitude"
     latitudes.units = "degrees_north"
     latitudes.standard_name = "latitude"
     latitudes[:] = MISSING
 
-    longitudes = ncdf_file.createVariable('lon', 'f8', ('stn_id',), fill_value=MISSING)
+    longitudes = ncdf_file.createVariable(LON, 'f8', (STN_ID,), fill_value=MISSING)
     longitudes.long_name = 'longitude'
     longitudes.units = "degrees_east"
     longitudes.standard_name = "longitude"
     longitudes[:] = MISSING
 
-    elevs = ncdf_file.createVariable('elev', 'f8', ('stn_id',), fill_value=MISSING)
+    elevs = ncdf_file.createVariable(ELEV, 'f8', (STN_ID,), fill_value=MISSING)
     elevs.long_name = "elevation"
     elevs.units = "m"
     elevs.standard_name = "elevation"
     elevs[:] = MISSING
 
-    tmin_var = ncdf_file.createVariable('tmin', 'f4', ('time', 'stn_id'), fill_value=MISSING,zlib=True,
+    tmin_var = ncdf_file.createVariable('tmin', 'f4', ('time', STN_ID),
+                                        fill_value=MISSING,zlib=True,
                                         chunksizes=(days[DATE].size, 1))
     tmin_var.long_name = "minimum air temperature"
     tmin_var.units = "C"
@@ -399,7 +406,8 @@ def create_netcdf_db(path, min_date, max_date, inserts):
     tmin_var.missing_value = MISSING
     #tmin_var[:, :] = MISSING
 
-    tmax_var = ncdf_file.createVariable('tmax', 'f4', ('time', 'stn_id'), fill_value=MISSING,zlib=True,
+    tmax_var = ncdf_file.createVariable('tmax', 'f4', ('time', STN_ID),
+                                        fill_value=MISSING,zlib=True,
                                         chunksizes=(days[DATE].size, 1))
     tmax_var.long_name = "maximum air temperature"
     tmax_var.units = "C"
@@ -414,14 +422,16 @@ def create_netcdf_db(path, min_date, max_date, inserts):
 #    ncdf_var.missing_value = MISSING
 #    ncdf_var[:,:] = MISSING
 
-    ncdf_var = ncdf_file.createVariable('qflag_tmin', 'S1', ('time', 'stn_id'), fill_value='',zlib=True,
+    ncdf_var = ncdf_file.createVariable('qflag_tmin', 'S1', ('time', STN_ID),
+                                        fill_value='',zlib=True,
                                         chunksizes=(days[DATE].size, 1))
     ncdf_var.long_name = "quality assurance flag tmin"
     ncdf_var.standard_name = "quality assurance flag tmin"
     ncdf_var.missing_value = ""
     #ncdf_var[:, :] = ""
 
-    ncdf_var = ncdf_file.createVariable('qflag_tmax', 'S1', ('time', 'stn_id'), fill_value='',zlib=True,
+    ncdf_var = ncdf_file.createVariable('qflag_tmax', 'S1', ('time', STN_ID),
+                                        fill_value='',zlib=True,
                                         chunksizes=(days[DATE].size, 1))
     ncdf_var.long_name = "quality assurance flag tmax"
     ncdf_var.standard_name = "quality assurance flag tmax"
@@ -506,12 +516,12 @@ def insert_data_netcdf_db(db_path, insert_objs):
 
     for x in np.arange(stn_ids.size):
 
-        ds.variables['stn_id'][x] = str(stn_ids[x])
-        ds.variables['lat'][x] = lats[x]
-        ds.variables['lon'][x] = lons[x]
-        ds.variables['elev'][x] = elev[x]
-        ds.variables['state'][x] = str(state[x])
-        ds.variables['name'][x] = name[x]
+        ds.variables[STN_ID][x] = str(stn_ids[x])
+        ds.variables[LAT][x] = lats[x]
+        ds.variables[LON][x] = lons[x]
+        ds.variables[ELEV][x] = elev[x]
+        ds.variables[STATE][x] = str(state[x])
+        ds.variables[STN_NAME][x] = name[x]
 
     ds.sync()
     ########################################################
@@ -527,7 +537,7 @@ def insert_data_netcdf_db(db_path, insert_objs):
 
     for insert, stn_rows in zip(insert_objs, all_stn_rows_ls):
 
-        stn_ids = ds.variables['stn_id'][:]
+        stn_ids = ds.variables[STN_ID][:]
 
         stn_id = ""
         stn_idx = 0
@@ -1266,8 +1276,9 @@ def add_monthly_means(ds_path, var_name, max_miss=9):
     
     if var_mthly_name not in ds.variables.keys():
 
-        var_mthly = ds.createVariable(var_mthly_name, 'f4', ('time_mth', 'stn_id'),zlib=True,
-                                     chunksizes=(tagg.yr_mths.size, 1),fill_value=netCDF4.default_fillvals['f4'])
+        var_mthly = ds.createVariable(var_mthly_name, 'f4', ('time_mth', STN_ID),
+                                      zlib=True, chunksizes=(tagg.yr_mths.size, 1),
+                                      fill_value=netCDF4.default_fillvals['f4'])
 
     else:
 
@@ -1277,8 +1288,9 @@ def add_monthly_means(ds_path, var_name, max_miss=9):
     
     if var_miss_name not in ds.variables.keys():
          
-        var_miss = ds.createVariable(var_miss_name,'i2',('time_mth','stn_id'),zlib=True,
-                                    chunksizes=(tagg.yr_mths.size, 1),fill_value=netCDF4.default_fillvals['i2'])
+        var_miss = ds.createVariable(var_miss_name,'i2',('time_mth', STN_ID),
+                                     zlib=True, chunksizes=(tagg.yr_mths.size, 1),
+                                     fill_value=netCDF4.default_fillvals['i2'])
     
     else:
         
@@ -1318,7 +1330,7 @@ def add_monthly_means(ds_path, var_name, max_miss=9):
         ds.sync()
         stchk.increment()
 
-def add_utc_offset(ds_path, fpath_timezone_shp, geonames_usrname=None):
+def add_utc_offset(ds_path, geonames_usrname=None):
     '''
     Add a UTC offset station attribute to a netCDF database
     
@@ -1326,27 +1338,25 @@ def add_utc_offset(ds_path, fpath_timezone_shp, geonames_usrname=None):
     ----------
     ds_path : str
         File path to a netCDF station database
-    fpath_timezone_shp : str
-        Path to world_timezones.shp shapefile that defines
-        UTC offsets. Downloaded from http://www.sharegeo.ac.uk/handle/10672/285.
     geonames_usrname : str, optional
         A Geonames username. If not None,
         the Geonames time zone data web service will be
         used if time zone information for a point cannot
-        be determined locally.  
+        be determined locally.
     '''
     
     stnda = twx.db.StationDataDb(ds_path, mode='r+') 
     
-    var_utc = stnda.add_stn_variable(twx.db.UTC_OFFSET,twx.db.UTC_OFFSET,"hours","i2")
+    var_utc = stnda.add_stn_variable(twx.db.UTC_OFFSET, twx.db.UTC_OFFSET,
+                                     "", "i2")
     
     ndata = netCDF4.default_fillvals['i2']
     
-    utc = twx.db.UtcOffset(fpath_timezone_shp, ndata, geonames_usrname)
+    utc = twx.db.UtcOffset(ndata, geonames_usrname)
     
     print "Starting to get station UTC offset data..."
     
-    schk = StatusCheck(stnda.stns.size, 100)
+    schk = StatusCheck(stnda.stns.size, 1000)
     
     for x in np.arange(stnda.stns.size):
         
@@ -1368,8 +1378,256 @@ def add_utc_offset(ds_path, fpath_timezone_shp, geonames_usrname=None):
         
         schk.increment()
     
+    stnda.ds.sync()
     stnda.ds.close()
     stnda = None
     
+def add_obs_cnt(ds_path, elem, start_date, end_date, stn_chk=500):
+    '''Add period-of-record observation count netCDF variable
+    
+    For each station, calculates the number of daily observations in each month
+    over a specified time period. Adds the observation counts as a
+    netCDF variables of name: obs_cnt_[elem]_[ymd-start]_[ymd-end]
+    
+    Parameters
+    ----------
+    ds_path : str
+        File path to a netCDF station database
+    elem : str
+        Element name for which to calculation observation count (e.g.-tmin)
+    start_date : date-like
+        The start date for time period over which to calculation obs counts
+    end_date : date-like
+        The end date for time period over which to calculation obs counts
+    stn_chk : int, optional
+        The number of stations to process in memory at a time. Default: 500.
+    '''
+    
+    ds = xr.open_dataset(ds_path)
+    
+    cnts = []
+    
+    schk = StatusCheck(ds.station_id.size, stn_chk)
+    
+    for i in np.arange(ds.station_id.size, step=stn_chk):
+    
+        da = ds[elem][:,i:(i+stn_chk)].load().loc[start_date:end_date,:]
+        
+        cnt = da.groupby('time.month').count(dim='time')
+        
+        cnts.append(cnt)
+        
+        schk.increment(stn_chk)
+    
+    cnts = xr.concat(cnts, dim='station_id')
+    ds.close()
+    del ds
+    
+    ds = Dataset(ds_path,'r+')
+    vname = "obs_cnt_%s_%d_%d"%(elem,ymdL(start_date),ymdL(end_date))
+    
+    if "mth" not in ds.dimensions.keys():
+    
+        ds.createDimension('mth', 12)
+        vmth = ds.createVariable('mth', np.int, ('mth',),
+                                 fill_value=False)
+        vmth[:] = np.arange(1,13)
+        
+    if vname not in ds.variables.keys():
+        
+        vcnt = ds.createVariable(vname, np.int, ('mth','station_id'),
+                                 fill_value=False)
+        vcnt.comments = "Number of observations per calendar month"
+        
+    else:
+        
+        vcnt = ds.variables[vname]
+        
+    vcnt[:] = cnts.values
+    
+    ds.sync()
+    ds.close()
+
+def create_aux_db(path_all_db, path_infill_db_in, path_serial_db_in,
+                  path_db_out, varname, start_year, end_year,
+                  ds_version_str):
+    '''Create a station netCDF database file to include in the public auxiliary data
+        
+    Parameters
+    ----------
+    path_all_db : str
+        File path to the initial netCDF station database with raw observations from
+        all networks 
+    path_infill_db_in : str
+        File path to the netCDF station database with infilled observations
+    path_serial_db_in : str
+        File path to the netCDF station database with final observation time
+        series used as input to TopoWx
+    path_db_out : str
+        File path to write the output netCDF file
+    varname : str
+        The observation variable to write (tmin or tmax)
+    start_year : int
+        The start year of the observation time series
+    end_year : int
+        The end year of the observation time series
+    ds_version_str : str
+        The TopoWx dataset version string
+    '''
+    
+    out_variables_dict = {'tmax':[('tmax_raw', 'f4',
+                                   netCDF4.default_fillvals['f4'],
+                                   'maximum air temperature', 'C'),
+                                  ('tmax_homog', 'f4',
+                                   netCDF4.default_fillvals['f4'],
+                                   'maximum air temperature', 'C'),
+                                  ('tmax_infilled', 'f4',
+                                   netCDF4.default_fillvals['f4'],
+                                   'maximum air temperature', 'C')],
+                          'tmin':[('tmin_raw', 'f4',
+                                   netCDF4.default_fillvals['f4'],
+                                   'minimum air temperature', 'C'),
+                                  ('tmin_homog', 'f4',
+                                   netCDF4.default_fillvals['f4'],
+                                   'minimum air temperature', 'C'),
+                                  ('tmin_infilled', 'f4', 
+                                   netCDF4.default_fillvals['f4'],
+                                   'minimum air temperature', 'C')]}
+    
+    out_variables = out_variables_dict[varname]
+    
+    stnda_serial = StationSerialDataDb(path_serial_db_in, varname)
+    mask_stns = np.nonzero(np.isnan(stnda_serial.stns[BAD]))[0]
+    stns = stnda_serial.stns[mask_stns]
+    days = stnda_serial.days
+    mask_days = np.nonzero(np.logical_and(days[YEAR]>=start_year,
+                                          days[YEAR]<=end_year))[0]
+    stnda_serial.ds.close()
+    del stnda_serial
+    
+    print "Creating %s..."%path_db_out
+    create_quick_db(path_db_out, stns, days, out_variables)
+    
+    ds_in = Dataset(path_serial_db_in)
+    ds_out = Dataset(path_db_out,'r+')
+    
+    print "Reading data from %s..."%path_serial_db_in
+    tair_in = ds_in.variables[varname][:,mask_stns]
+    tair_in = tair_in[mask_days,:]
+    
+    print "Writing data to %s..."%path_db_out
+    ds_out.variables["%s_infilled"%varname][:] = tair_in
+    ds_out.sync()
+    ds_in.close()
+    
+    stnda = StationDataDb(path_all_db)
+    mask_stns = np.nonzero(np.in1d(stnda.stn_ids, stns[STN_ID], True))[0]
+    days = stnda.days
+    mask_days = np.nonzero(np.logical_and(days[YEAR]>=start_year,
+                                          days[YEAR]<=end_year))[0]
+    stnda.ds.close()
+    del stnda
+    
+    ds_in = Dataset(path_all_db)
+    
+    print "Reading data from %s..."%path_all_db
+    tair_in = ds_in.variables[varname][:,mask_stns]
+    tair_in = tair_in[mask_days,:]
+    
+    print "Writing data to %s..."%path_db_out
+    ds_out.variables["%s_raw"%varname][:] = tair_in
+    ds_out.sync()
+    ds_in.close()
+    
+    stnda_infill = StationDataDb(path_infill_db_in)
+    mask_stns = np.nonzero(np.in1d(stnda_infill.stn_ids,
+                                   stns[STN_ID], True))[0]
+    days = stnda_infill.days
+    mask_days = np.nonzero(np.logical_and(days[YEAR]>=start_year,
+                                          days[YEAR]<=end_year))[0]
+    stnda_infill.ds.close()
+    del stnda_infill
+    
+    ds_in = Dataset(path_infill_db_in)
+    
+    print "Reading data from %s..."%path_infill_db_in
+    tair_in = ds_in.variables[varname][:,mask_stns]
+    tair_in = tair_in[mask_days,:]
+    flag_infill = ds_in.variables['flag_infilled'][:,mask_stns].astype(np.bool)
+    flag_infill = flag_infill[mask_days,:]
+    tair_in = np.ma.masked_array(tair_in,flag_infill)
+        
+    print "Writing data to %s..."%path_db_out
+    ds_out.variables["%s_homog"%varname][:] = tair_in
+    ds_out.sync()
+    ds_in.close()
+    
+    ds_out.variables["%s_raw"%varname].comment = ("Original %s "
+                                                  "observations from "
+                                                  "data provider")%varname
+    
+    ds_out.variables["%s_homog"%varname].comment = ("QA'd and homogenized "
+                                                    "daily %s observations "
+                                                    "with missing values NOT "
+                                                    "infilled.")%varname
+
+    ds_out.variables['%s_infilled'%varname].comment = ("Final QA'd, "
+                                                       "homogenized, and "
+                                                       "missing value "
+                                                       "infilled daily %s "
+                                                       "observations used as "
+                                                       "input to TopoWx. For "
+                                                       "a station with more "
+                                                       "than 5 continuous "
+                                                       "years of missing "
+                                                       "observations, all the "
+                                                       "station's observations"
+                                                       " were replaced with "
+                                                       "values from the "
+                                                       "station's infill "
+                                                       "model. This was done "
+                                                       "to avoid "
+                                                       "inhomogeneities "
+                                                       "between long segments "
+                                                       "of infilled vs. "
+                                                       "observed "
+                                                       "values.")%varname
     
     
+    ds_out.title = ("TopoWx weather station database of %d-%d daily %s "
+                    "observations")%(start_year,end_year,varname)
+    
+    ds_out.comment = ("Original raw, QA'd, homogenized, and infilled %d-%d "
+                      "daily %s temperature observations for stations used as "
+                      "input to TopoWx. Includes stations with at least 5 "
+                      "years of observations in each month from GHCN-Daily, "
+                      "NRCS SNOTEL/SCAN, and WRCC RAWS.")%(start_year,end_year,varname)
+                      
+    ds_out.references = ("http://dx.doi.org/10.1002/joc.4127 , "
+                         "http://dx.doi.org/10.1002/2014GL062803 , "
+                         "http://dx.doi.org/10.1175/JAMC-D-15-0276.1")
+    
+    ds_out.source =  ("TopoWx software version %s "
+                      "(https://github.com/jaredwo/topowx)")%twx.__version__
+    ds_out.history = "".join(["Created on: ",datetime.datetime.strftime(date.today(),
+                                                               "%Y-%m-%d"),
+                              " , ","dataset version %s"%ds_version_str])
+    
+    ds_out.variables[STN_ID].comment = ("Original network station IDs with "
+                                        "added prefix. GHCND station IDs start "
+                                        "with 'GHCND_', NRCS SNOTEL/SCAN station "
+                                        "IDs start with 'NRCS_' and RAWS "
+                                        "station IDs start with 'RAWS_'. "
+                                        "Stored as a variable-length string "
+                                        "array.")
+    
+    ds_out.variables[STN_NAME].comment = ("Stored as a variable-length string "
+                                          "array.")
+    
+    ds_out.variables[STATE].comment = ("Stored as a variable-length string array. "
+                                       "Note: Some RAWS station states provided "
+                                       "by the WRCC do not appear to be correct.")
+    
+    ds_out.close()
+    
+        

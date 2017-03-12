@@ -2,7 +2,7 @@
 Utilities for retrieving time zone information for 
 a specific lon,lat.
 
-Copyright 2014, Jared Oyler.
+Copyright 2014,2015, Jared Oyler.
 
 This file is part of TopoWx.
 
@@ -22,12 +22,23 @@ along with TopoWx.  If not, see <http://www.gnu.org/licenses/>.
 
 __all__ = ['UtcOffset', 'GeonamesError', 'TZGeonamesClient']
 
+from datetime import datetime
+import json
 import numpy as np
+import pytz
 import urllib
 import urllib2
-import json
-import fiona
-from shapely.geometry import shape, MultiPolygon, Point
+
+# tzwhere currently sets log level to debug when imported
+# get log level before import and then reset log level to this
+# value after tzwhere import
+import logging
+logger = logging.getLogger()
+log_level = logger.level
+
+from tzwhere.tzwhere import tzwhere
+
+logger.setLevel(log_level)
 
 class UtcOffset():
     '''
@@ -35,13 +46,10 @@ class UtcOffset():
     Coordinated Universial Time (UTC) for a specific point.
     '''
 
-    def __init__(self, fpath_timezone_shp, ndata=-32767, geonames_usrname=None):
+    def __init__(self, ndata=-32767, geonames_usrname=None):
         '''
         Parameters
         ----------
-        fpath_timezone_shp : str
-            Path to world_timezones.shp shapefile that defines
-            UTC offsets. Downloaded from http://www.sharegeo.ac.uk/handle/10672/285.
         ndata : int, optional
             The value that should be returned if no time zone
             information can be found for the point of interest.
@@ -51,18 +59,20 @@ class UtcOffset():
             information if no information on a point's time zone can
             be found via the local shapefile.
         '''
-
-        fpath_utc_shpfile = fpath_timezone_shp
-
-        tz_shp = fiona.open(fpath_utc_shpfile)
-
-        print "Loading timezone UTC offsets..."
-        self.offsets = [p['properties']['UTC_OFFSET'] for p in tz_shp]
-        self.offsets = np.array([_utc_int(utc_str, ndata) for utc_str in self.offsets])
-
-        print "Loading timezone polygons..."
-        self.tz_polys = MultiPolygon([shape(poly['geometry']) for poly in tz_shp])
-
+        
+        print "Initializing tzwhere..."
+        self.tzw = tzwhere(shapely=True, forceTZ=True)
+        
+        self.tz_offsets = {}
+        tz_names = np.array(self.tzw.timezoneNamesToPolygons.keys())
+        tz_names = tz_names[tz_names != 'uninhabited']
+        
+        a_date = datetime(2009,1,1)
+        
+        for a_name in tz_names:
+            a_tz = pytz.timezone(a_name)
+            self.tz_offsets[a_name] = a_tz.utcoffset(a_date).total_seconds()/3600.0
+                
         if geonames_usrname is None:
             self.tz_geon = None
         else:
@@ -73,8 +83,8 @@ class UtcOffset():
     def get_utc_offset(self, lon, lat):
         '''
         Retrieve the UTC offset for a specific point. First checks
-        a local shapefile of time zones. If the time zone of the point
-        cannot be determined from the shapefile, the Geonames data web
+        local polygon file of time zones. If the time zone of the point
+        cannot be determined locally, the Geonames data web
         service will be checked if a Geonames username was provided on
         UtcOffset object creation.
         
@@ -91,33 +101,20 @@ class UtcOffset():
             The UTC offset for the point. If the offset cannot be
             determined, the ndata value is returned.
         '''
-
-        pt = Point(lon, lat)
-        i = np.nonzero(np.array([g.contains(pt) for g in self.tz_polys.geoms]))[0]
-
-        if i.size == 1:
-
-            return self.offsets[i[0]]
-
-        elif self.tz_geon is not None:
-
+        
+        tz_name = self.tzw.tzNameAt(lat, lon, forceTZ=True)
+        offset = self.ndata
+        
+        if tz_name is not None:
+            offset = self.tz_offsets[tz_name]
+        
+        
+        if offset == self.ndata and self.tz_geon is not None:
+             
             print "UtcOffset: Could not find UTC polygon for point %.4f,%.4f. Trying geonames..." % (lon, lat)
-            return self.tz_geon.get_utc_offset(lon, lat)
+            offset = self.tz_geon.get_utc_offset(lon, lat)
 
-        else:
-
-            return self.ndata
-
-
-def _utc_int(utc_str, ndata=-32767):
-
-    try:
-        int_utc = int(utc_str[3:6])
-    except (ValueError, TypeError):
-        int_utc = ndata
-
-    return int_utc
-
+        return offset
 
 class GeonamesError(Exception):
     '''
